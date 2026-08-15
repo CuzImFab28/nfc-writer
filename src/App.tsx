@@ -1,4 +1,4 @@
-import { useEffect, useState, useTransition, type FormEvent } from "react";
+import { useEffect, useRef, useState, useTransition, type FormEvent } from "react";
 import {
   clearTag,
   getNfcStatus,
@@ -11,7 +11,10 @@ import { Scene } from "./scene/Scene";
 import { CornerBrackets } from "./ui/CornerBrackets";
 import { HexdumpTicker } from "./ui/HexdumpTicker";
 import { RadarSweep } from "./ui/RadarSweep";
+import { WriteBurst } from "./ui/WriteBurst";
 import "./App.css";
+
+const WRITE_FX_MS = 2200;
 
 const initialStatus: NfcStatus = {
   phase: "idle",
@@ -43,8 +46,11 @@ function App() {
   const [payload, setPayload] = useState("https://example.com");
   const [kind, setKind] = useState<"url" | "text">("url");
   const [pending, startTransition] = useTransition();
+  const [writingFx, setWritingFx] = useState(false);
+  const writeTimer = useRef<number | null>(null);
 
   const chipPresent = isChipPresent(status);
+  const writing = writingFx || status.phase === "writing";
 
   useEffect(() => {
     let alive = true;
@@ -54,6 +60,9 @@ function App() {
     })();
     return () => {
       alive = false;
+      if (writeTimer.current != null) {
+        window.clearTimeout(writeTimer.current);
+      }
     };
   }, []);
 
@@ -66,13 +75,26 @@ function App() {
 
   function onWrite(event: FormEvent) {
     event.preventDefault();
-    if (!chipPresent) return;
+    if (!chipPresent || writingFx || pending) return;
+
+    setWritingFx(true);
     setStatus((prev) => ({
       ...prev,
       phase: "writing",
-      message: "Schreibe NDEF…",
+      message: "Schreibsequenz läuft…",
     }));
-    run(() => writeNdef({ payload, kind }));
+
+    if (writeTimer.current != null) {
+      window.clearTimeout(writeTimer.current);
+    }
+
+    writeTimer.current = window.setTimeout(() => {
+      startTransition(async () => {
+        const next = await writeNdef({ payload, kind });
+        setStatus(next);
+        setWritingFx(false);
+      });
+    }, WRITE_FX_MS);
   }
 
   const modeLabel = status.mockMode ? "Mock" : "PC/SC";
@@ -80,7 +102,9 @@ function App() {
   const capacityLabel = status.tag ? `${status.tag.capacityBytes} B` : "—";
 
   return (
-    <div className="app-shell">
+    <div className={["app-shell", writing ? "is-writing" : ""].filter(Boolean).join(" ")}>
+      <WriteBurst active={writing} />
+
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden>
@@ -127,10 +151,16 @@ function App() {
 
       <main className="workspace">
         <section
-          className={["scanner", chipPresent ? "has-chip" : ""].filter(Boolean).join(" ")}
+          className={[
+            "scanner",
+            chipPresent ? "has-chip" : "",
+            writing ? "is-writing" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           aria-label="NFC-Scanner"
         >
-          <RadarSweep intensified={chipPresent} />
+          <RadarSweep intensified={chipPresent || writing} />
           <p
             className={[
               "scan-label mono",
@@ -144,9 +174,11 @@ function App() {
             {scanPrimaryLabel(status, chipPresent)}
           </p>
           <p className="scan-label mono right">{scanSecondaryLabel(status, chipPresent)}</p>
-          <CornerBrackets active={chipPresent} />
-          {!chipPresent && <p className="tap-hint mono">Chip auf den Reader legen</p>}
-          <Scene chipPresent={chipPresent} />
+          <CornerBrackets active={chipPresent || writing} />
+          {!chipPresent && !writing && (
+            <p className="tap-hint mono">Chip auf den Reader legen</p>
+          )}
+          <Scene chipPresent={chipPresent} writing={writing} />
           <HexdumpTicker />
         </section>
 
@@ -167,6 +199,7 @@ function App() {
                 onChange={(e) => setPayload(e.target.value)}
                 placeholder={kind === "url" ? "https://…" : "Text…"}
                 autoComplete="off"
+                disabled={writing}
               />
             </div>
 
@@ -178,6 +211,7 @@ function App() {
                 type="button"
                 className={["tab mono", kind === "url" ? "active" : ""].filter(Boolean).join(" ")}
                 onClick={() => setKind("url")}
+                disabled={writing}
               >
                 URL
               </button>
@@ -187,17 +221,20 @@ function App() {
                   .filter(Boolean)
                   .join(" ")}
                 onClick={() => setKind("text")}
+                disabled={writing}
               >
                 Text
               </button>
             </div>
 
             <button
-              className="btn primary mono"
+              className={["btn primary mono", writing ? "is-firing" : ""]
+                .filter(Boolean)
+                .join(" ")}
               type="submit"
-              disabled={pending || !chipPresent}
+              disabled={pending || !chipPresent || writing}
             >
-              Auf Chip schreiben
+              {writing ? "Schreibe…" : "Auf Chip schreiben"}
             </button>
 
             <div className="btn-row">
@@ -205,7 +242,7 @@ function App() {
                 type="button"
                 className="btn mono"
                 onClick={() => run(simulateTagPresent)}
-                disabled={pending}
+                disabled={pending || writing}
               >
                 Chip simulieren
               </button>
@@ -213,7 +250,7 @@ function App() {
                 type="button"
                 className="btn danger mono"
                 onClick={() => run(clearTag)}
-                disabled={pending}
+                disabled={pending || writing}
               >
                 Entfernen
               </button>

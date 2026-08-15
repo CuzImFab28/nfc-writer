@@ -4,9 +4,10 @@ import { ScannerMesh } from "./ScannerMesh";
 
 type SceneProps = {
   chipPresent: boolean;
+  writing?: boolean;
 };
 
-export function Scene({ chipPresent }: SceneProps) {
+export function Scene({ chipPresent, writing = false }: SceneProps) {
   return (
     <div className="scene-canvas">
       <Canvas
@@ -16,7 +17,7 @@ export function Scene({ chipPresent }: SceneProps) {
         style={{ pointerEvents: "none" }}
       >
         <Suspense fallback={null}>
-          <ScannerMesh chipPresent={chipPresent} />
+          <ScannerMesh chipPresent={chipPresent} writing={writing} />
         </Suspense>
       </Canvas>
     </div>
