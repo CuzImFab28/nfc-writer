@@ -3,6 +3,7 @@ import {
   clearTag,
   getNfcStatus,
   simulateTagPresent,
+  subscribeNfcStatus,
   writeNdef,
 } from "./nfc/client";
 import { isChipPresent, phaseStatusLabel } from "./nfc/status";
@@ -54,12 +55,26 @@ function App() {
 
   useEffect(() => {
     let alive = true;
+    let unsubscribe: (() => void) | undefined;
+
     (async () => {
       const next = await getNfcStatus();
       if (alive) setStatus(next);
+      unsubscribe = await subscribeNfcStatus((live) => {
+        if (!alive) return;
+        // Während der lokalen Schreib-FX den Status nicht zurücksetzen
+        setStatus((prev) => {
+          if (prev.phase === "writing" && live.phase === "waitingForTag") {
+            return prev;
+          }
+          return live;
+        });
+      });
     })();
+
     return () => {
       alive = false;
+      unsubscribe?.();
       if (writeTimer.current != null) {
         window.clearTimeout(writeTimer.current);
       }
@@ -97,7 +112,11 @@ function App() {
     }, WRITE_FX_MS);
   }
 
-  const modeLabel = status.mockMode ? "Mock" : "PC/SC";
+  const modeLabel = status.mockMode
+    ? "Mock"
+    : status.readerConnected
+      ? "PC/SC"
+      : "Offline";
   const chipTypeLabel = status.tag?.chipType ?? "—";
   const capacityLabel = status.tag ? `${status.tag.capacityBytes} B` : "—";
 

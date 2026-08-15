@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { NfcStatus, WriteRequest } from "./types";
 
 const defaultStatus = (): NfcStatus => ({
   phase: "idle",
-  readerConnected: true,
+  readerConnected: false,
   mockMode: true,
   tag: null,
   lastPayload: null,
@@ -93,4 +94,26 @@ export async function writeNdef(request: WriteRequest): Promise<NfcStatus> {
     };
     return { ...browserMock };
   }
+}
+
+/** Live-Updates vom PC/SC-Watcher (nur in Tauri). */
+export async function subscribeNfcStatus(
+  onStatus: (status: NfcStatus) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+
+  let unlisten: UnlistenFn | undefined;
+  try {
+    unlisten = await listen<NfcStatus>("nfc-status", (event) => {
+      onStatus(event.payload);
+    });
+  } catch {
+    return () => undefined;
+  }
+
+  return () => {
+    unlisten?.();
+  };
 }

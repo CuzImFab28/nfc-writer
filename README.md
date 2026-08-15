@@ -4,44 +4,39 @@ Desktop-App zum Beschreiben von NFC-Chips mit **Tauri + React + React Three Fibe
 
 ## Stack
 
-- **UI:** React 19, Vite, React Three Fiber / Drei
+- **UI:** React 19, Vite, React Three Fiber
 - **Desktop-Shell:** Tauri 2 (Rust)
-- **NFC:** Mock-Bridge jetzt, PC/SC-Reader später
+- **NFC:** PC/SC (ACR122U und kompatible Reader), Mock-Fallback
 
-## Lokal am Desktop sehen
+## Lokal am Desktop
 
 Voraussetzungen: [Tauri Prerequisites](https://tauri.app/start/prerequisites/) (Node, Rust, OS-WebView).
+
+Windows + ACR122U: Hersteller-Treiber / PC/SC (WinSCard) installieren, Reader anschließen.
 
 ```bash
 npm install
 npm run tauri:dev
 ```
 
-Nur UI im Browser (Mock, ohne native Window-Shell):
+Nur UI im Browser (Mock):
 
 ```bash
 npm run dev
 ```
 
-Änderungen an der 3D-UI erscheinen per HMR sofort.
+## Nutzung mit ACR122U
 
-## Aktuelles Grundkonzept
+1. Reader anstecken, App starten (`tauri:dev` / gebaute `.exe`)
+2. Status sollte auf **PC/SC** wechseln („Reader verbunden…“)
+3. NTAG213/215/216 auflegen → UID/Typ erscheinen automatisch
+4. URL oder Text eingeben → **Auf Chip schreiben**
+5. Mit dem Handy prüfen (NFC-Tag lesen)
 
-1. Zentrale 3D-Szene mit schwebendem NFC-Chip (reagiert auf Session-Phase)
-2. Dock rechts: URL/Text schreiben, Chip simulieren, Status
-3. Rust-Commands: `get_nfc_status`, `simulate_tag_present`, `clear_tag`, `write_ndef`
-4. Frontend-Client fällt ohne Tauri automatisch auf Browser-Mock zurück
+Ohne Reader bleibt der **Mock**-Modus („Chip simulieren“) nutzbar.
 
-## Nächste Schritte
+## Architektur (kurz)
 
-- Echten USB-Reader per PC/SC anbinden
-- NDEF schreiben/lesen für NTAG / Ultralight
-- Batch-Modus für viele Chips
-
-## Repo-Migration
-
-Dieses Scaffold liegt vorübergehend im Repo `lernen`. Für das eigene Produkt-Repo:
-
-1. Auf GitHub leeres Repo `nfc-writer` anlegen (unter deinem Account)
-2. Neuen Cursor-Cloud-Agent / Chat auf **dieses** Repo starten
-3. Code hierher übernehmen (oder Remote umbiegen) und weiterbauen
+- Rust pollt PC/SC, erkennt Tags, schreibt Type-2-NDEF (URI/Text)
+- Frontend lauscht auf Event `nfc-status`
+- Commands: `get_nfc_status`, `simulate_tag_present`, `clear_tag`, `write_ndef`
