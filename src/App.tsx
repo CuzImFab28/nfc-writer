@@ -14,7 +14,7 @@ import { RadarSweep } from "./ui/RadarSweep";
 import { WriteBurst } from "./ui/WriteBurst";
 import "./App.css";
 
-const WRITE_FX_MS = 2200;
+const WRITE_FX_MS = 1400;
 
 const initialStatus: NfcStatus = {
   phase: "idle",
@@ -81,7 +81,7 @@ function App() {
     setStatus((prev) => ({
       ...prev,
       phase: "writing",
-      message: "Schreibsequenz läuft…",
+      message: "Schreibe NDEF…",
     }));
 
     if (writeTimer.current != null) {
