@@ -12,7 +12,10 @@ Desktop-App zum Beschreiben von NFC-Chips mit **Tauri + React + React Three Fibe
 
 Voraussetzungen: [Tauri Prerequisites](https://tauri.app/start/prerequisites/) (Node, Rust, OS-WebView).
 
-Windows + ACR122U: Hersteller-Treiber / PC/SC (WinSCard) installieren, Reader anschließen.
+Windows + ACR122U:
+- ACS-Treiber installieren (ohne CD: [ACR122U Downloads](https://www.acs.com.hk/en/products/3/acr122u-usb-nfc-reader/))
+- Dienst **Smartcard** in `services.msc` auf „Wird ausgeführt“ / Start „Automatisch“
+- Reader direkt am PC-USB anschließen (kein Hub)
 
 ```bash
 npm install

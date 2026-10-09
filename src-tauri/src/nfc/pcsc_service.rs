@@ -5,10 +5,13 @@ use crate::nfc::type2::{connect_to_reader, disconnect, inspect_tag, write_ndef_t
 use crate::nfc::types::{NfcStatus, SessionPhase, TagInfo, WriteRequest};
 use pcsc::{Context, Scope};
 use std::ffi::CString;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+
+const PCSC_PANIC_HINT: &str = "PC/SC-Fehler unter Windows (oft Code 0x1F). Bitte Dienst „Smartcard“ starten (services.msc) und den ACS ACR122U-Treiber prüfen.";
 
 pub struct NfcService {
     pub status: Mutex<NfcStatus>,
@@ -131,13 +134,14 @@ impl NfcService {
             .map(|t| t.capacity_bytes)
             .unwrap_or(144);
 
-        let write_result = (|| -> Result<(), String> {
-            let ctx = Context::establish(Scope::User).map_err(|e| e.to_string())?;
+        let write_result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = establish_context()?;
             let card = connect_to_reader(&ctx, reader_name.as_c_str()).map_err(|e| e.to_string())?;
             let result = write_ndef_tlv(&card, &tlv, capacity).map_err(|e| e.to_string());
             disconnect(card);
             result
-        })();
+        }))
+        .unwrap_or_else(|_| Err(PCSC_PANIC_HINT.into()));
 
         match write_result {
             Ok(()) => self.set_status(None, |status| {
@@ -150,6 +154,20 @@ impl NfcService {
                 status.message = format!("Schreiben fehlgeschlagen: {err}");
             }),
         }
+    }
+}
+
+fn establish_context() -> Result<Context, String> {
+    // Manche Windows/ACS-Setups liefern unbekannte Fehlercodes (z. B. 0x1F),
+    // bei denen die pcsc-crate panikt statt Err zurückzugeben.
+    match catch_unwind(|| Context::establish(Scope::User)) {
+        Ok(Ok(ctx)) => return Ok(ctx),
+        Ok(Err(_)) | Err(_) => {}
+    }
+    match catch_unwind(|| Context::establish(Scope::System)) {
+        Ok(Ok(ctx)) => Ok(ctx),
+        Ok(Err(err)) => Err(format!("PC/SC nicht verfügbar ({err}).")),
+        Err(_) => Err(PCSC_PANIC_HINT.into()),
     }
 }
 
@@ -167,7 +185,9 @@ fn reader_priority(name: &str) -> i32 {
 }
 
 fn pick_reader(ctx: &Context) -> Result<Option<CString>, String> {
-    let readers = ctx.list_readers_owned().map_err(|e| e.to_string())?;
+    let readers = catch_unwind(AssertUnwindSafe(|| ctx.list_readers_owned()))
+        .map_err(|_| PCSC_PANIC_HINT.to_string())?
+        .map_err(|e| e.to_string())?;
     let mut best: Option<(i32, CString)> = None;
     for name in readers {
         let score = reader_priority(&name.to_string_lossy());
@@ -181,10 +201,13 @@ fn pick_reader(ctx: &Context) -> Result<Option<CString>, String> {
 }
 
 fn try_read_tag(ctx: &Context, reader: &CString) -> Result<TagInfo, String> {
-    let card = connect_to_reader(ctx, reader.as_c_str()).map_err(|e| e.to_string())?;
-    let info = inspect_tag(&card).map_err(|e| e.to_string());
-    disconnect(card);
-    info
+    catch_unwind(AssertUnwindSafe(|| {
+        let card = connect_to_reader(ctx, reader.as_c_str()).map_err(|e| e.to_string())?;
+        let info = inspect_tag(&card).map_err(|e| e.to_string());
+        disconnect(card);
+        info
+    }))
+    .unwrap_or_else(|_| Err(PCSC_PANIC_HINT.into()))
 }
 
 pub fn spawn_watcher(app: AppHandle, service: Arc<NfcService>) {
@@ -193,120 +216,140 @@ pub fn spawn_watcher(app: AppHandle, service: Arc<NfcService>) {
         let mut announced_reader: Option<String> = None;
 
         loop {
-            let ctx = match Context::establish(Scope::User) {
-                Ok(ctx) => ctx,
-                Err(err) => {
-                    let _ = service.set_status(Some(&app), |status| {
-                        status.reader_connected = false;
-                        status.mock_mode = true;
-                        if status.phase != SessionPhase::TagPresent
-                            && status.phase != SessionPhase::Success
-                            && status.phase != SessionPhase::Writing
-                        {
-                            status.phase = SessionPhase::Idle;
-                            status.tag = None;
-                        }
-                        status.message =
-                            format!("PC/SC nicht verfügbar ({err}). Mock-Modus aktiv.");
-                    });
-                    last_uid = None;
-                    announced_reader = None;
-                    thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-            };
+            let tick = catch_unwind(AssertUnwindSafe(|| {
+                poll_once(&app, &service, &mut last_uid, &mut announced_reader)
+            }));
 
-            let reader = match pick_reader(&ctx) {
-                Ok(Some(name)) => name,
-                Ok(None) => {
-                    let _ = service.set_status(Some(&app), |status| {
-                        status.reader_connected = false;
-                        if !status.mock_mode || status.tag.is_none() {
-                            status.mock_mode = true;
-                        }
-                        if status.phase != SessionPhase::TagPresent
-                            && status.phase != SessionPhase::Success
-                            && status.phase != SessionPhase::Writing
-                        {
-                            status.phase = SessionPhase::Idle;
-                            status.tag = None;
-                            status.message =
-                                "Kein PC/SC-Reader gefunden. ACR122U anschließen oder Chip simulieren."
-                                    .into();
-                        }
-                    });
-                    if let Ok(mut slot) = service.preferred_reader.lock() {
-                        *slot = None;
-                    }
-                    last_uid = None;
-                    announced_reader = None;
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-                Err(err) => {
-                    let _ = service.set_status(Some(&app), |status| {
-                        status.reader_connected = false;
-                        status.message = format!("Reader-Liste fehlgeschlagen: {err}");
-                    });
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-            };
-
-            if let Ok(mut slot) = service.preferred_reader.lock() {
-                *slot = Some(reader.clone());
-            }
-
-            let label = reader.to_string_lossy().into_owned();
-            if announced_reader.as_ref() != Some(&label) {
-                announced_reader = Some(label.clone());
+            if tick.is_err() {
                 let _ = service.set_status(Some(&app), |status| {
-                    status.reader_connected = true;
-                    // Nur Mock verlassen, wenn kein manuell simulierter Tag aktiv ist
-                    if status.phase != SessionPhase::TagPresent || status.tag.is_none() {
-                        status.mock_mode = false;
-                        status.phase = SessionPhase::WaitingForTag;
-                    }
-                    status.message = format!("Reader verbunden: {label}. Warte auf Chip…");
+                    status.reader_connected = false;
+                    status.mock_mode = true;
+                    status.message = PCSC_PANIC_HINT.into();
                 });
-            }
-
-            match try_read_tag(&ctx, &reader) {
-                Ok(tag) => {
-                    let uid = tag.uid.clone();
-                    if last_uid.as_ref() != Some(&uid) {
-                        last_uid = Some(uid);
-                        let _ = service.set_status(Some(&app), |status| {
-                            if status.phase == SessionPhase::Writing {
-                                return;
-                            }
-                            status.reader_connected = true;
-                            status.mock_mode = false;
-                            status.phase = SessionPhase::TagPresent;
-                            status.tag = Some(tag);
-                            status.message = "Chip erkannt. Bereit zum Schreiben.".into();
-                        });
-                    }
-                }
-                Err(_) => {
-                    if last_uid.take().is_some() {
-                        let _ = service.set_status(Some(&app), |status| {
-                            if status.phase == SessionPhase::Writing {
-                                return;
-                            }
-                            // Simulierten Mock-Tag nicht löschen
-                            if status.mock_mode {
-                                return;
-                            }
-                            status.tag = None;
-                            status.phase = SessionPhase::WaitingForTag;
-                            status.message = "Chip entfernt. Lege den nächsten Tag auf.".into();
-                        });
-                    }
-                }
+                last_uid = None;
+                announced_reader = None;
+                thread::sleep(Duration::from_secs(2));
+                continue;
             }
 
             thread::sleep(Duration::from_millis(350));
         }
     });
+}
+
+fn poll_once(
+    app: &AppHandle,
+    service: &Arc<NfcService>,
+    last_uid: &mut Option<String>,
+    announced_reader: &mut Option<String>,
+) {
+    let ctx = match establish_context() {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            let _ = service.set_status(Some(app), |status| {
+                status.reader_connected = false;
+                status.mock_mode = true;
+                if status.phase != SessionPhase::TagPresent
+                    && status.phase != SessionPhase::Success
+                    && status.phase != SessionPhase::Writing
+                {
+                    status.phase = SessionPhase::Idle;
+                    status.tag = None;
+                }
+                status.message = format!("{err} Mock-Modus aktiv.");
+            });
+            *last_uid = None;
+            *announced_reader = None;
+            thread::sleep(Duration::from_secs(2));
+            return;
+        }
+    };
+
+    let reader = match pick_reader(&ctx) {
+        Ok(Some(name)) => name,
+        Ok(None) => {
+            let _ = service.set_status(Some(app), |status| {
+                status.reader_connected = false;
+                if !status.mock_mode || status.tag.is_none() {
+                    status.mock_mode = true;
+                }
+                if status.phase != SessionPhase::TagPresent
+                    && status.phase != SessionPhase::Success
+                    && status.phase != SessionPhase::Writing
+                {
+                    status.phase = SessionPhase::Idle;
+                    status.tag = None;
+                    status.message =
+                        "Kein PC/SC-Reader gefunden. ACR122U anschließen oder Chip simulieren."
+                            .into();
+                }
+            });
+            if let Ok(mut slot) = service.preferred_reader.lock() {
+                *slot = None;
+            }
+            *last_uid = None;
+            *announced_reader = None;
+            thread::sleep(Duration::from_secs(1));
+            return;
+        }
+        Err(err) => {
+            let _ = service.set_status(Some(app), |status| {
+                status.reader_connected = false;
+                status.message = format!("Reader-Liste fehlgeschlagen: {err}");
+            });
+            thread::sleep(Duration::from_secs(1));
+            return;
+        }
+    };
+
+    if let Ok(mut slot) = service.preferred_reader.lock() {
+        *slot = Some(reader.clone());
+    }
+
+    let label = reader.to_string_lossy().into_owned();
+    if announced_reader.as_ref() != Some(&label) {
+        *announced_reader = Some(label.clone());
+        let _ = service.set_status(Some(app), |status| {
+            status.reader_connected = true;
+            if status.phase != SessionPhase::TagPresent || status.tag.is_none() {
+                status.mock_mode = false;
+                status.phase = SessionPhase::WaitingForTag;
+            }
+            status.message = format!("Reader verbunden: {label}. Warte auf Chip…");
+        });
+    }
+
+    match try_read_tag(&ctx, &reader) {
+        Ok(tag) => {
+            let uid = tag.uid.clone();
+            if last_uid.as_ref() != Some(&uid) {
+                *last_uid = Some(uid);
+                let _ = service.set_status(Some(app), |status| {
+                    if status.phase == SessionPhase::Writing {
+                        return;
+                    }
+                    status.reader_connected = true;
+                    status.mock_mode = false;
+                    status.phase = SessionPhase::TagPresent;
+                    status.tag = Some(tag);
+                    status.message = "Chip erkannt. Bereit zum Schreiben.".into();
+                });
+            }
+        }
+        Err(_) => {
+            if last_uid.take().is_some() {
+                let _ = service.set_status(Some(app), |status| {
+                    if status.phase == SessionPhase::Writing {
+                        return;
+                    }
+                    if status.mock_mode {
+                        return;
+                    }
+                    status.tag = None;
+                    status.phase = SessionPhase::WaitingForTag;
+                    status.message = "Chip entfernt. Lege den nächsten Tag auf.".into();
+                });
+            }
+        }
+    }
 }
